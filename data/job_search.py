@@ -1,75 +1,166 @@
 import csv
 import hashlib
+import html
 import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from html import unescape
 from pathlib import Path
 
 CSV_FILE = Path("data/job_tracker.csv")
 
-# Search the public web for actual job-listing pages instead of Google News.
+# Search engines are used only to discover individual job-posting pages.
+# The tracker rejects generic search/list pages and keeps direct job URLs.
 SEARCHES = [
-    'Java Developer Hyderabad fresher jobs',
-    'Java Developer Hyderabad 0-2 years jobs',
-    'Java Full Stack Developer Hyderabad jobs',
-    'Spring Boot Java Developer Hyderabad fresher jobs',
-    'Junior Java Developer Hyderabad jobs',
-    'Trainee Java Developer Hyderabad jobs',
-    'Java Developer Hyderabad graduate jobs',
+    'site:linkedin.com/jobs/view Java Developer Hyderabad fresher',
+    'site:linkedin.com/jobs/view Java Full Stack Developer Hyderabad',
+    'site:in.indeed.com/viewjob Java Developer Hyderabad fresher',
+    'site:in.indeed.com/viewjob Java Full Stack Developer Hyderabad',
+    'site:naukri.com/job-listings Java Developer Hyderabad fresher',
+    'site:foundit.in/job Java Developer Hyderabad fresher',
+    'site:hirist.tech Java Developer Hyderabad 0-2 years',
+    'site:internshala.com/job/detail Java Developer Hyderabad fresher',
+    'site:shine.com/jobs Java Developer Hyderabad fresher',
 ]
 
-JOB_SITES = [
-    "indeed.com", "naukri.com", "linkedin.com/jobs", "foundit.in",
-    "hirist.tech", "instahyre.com", "cutshort.io", "wellfound.com",
-    "internshala.com", "shine.com", "freshersworld.com", "ambitionbox.com"
+ALLOWED_DOMAINS = [
+    "linkedin.com", "indeed.com", "naukri.com", "foundit.in",
+    "hirist.tech", "internshala.com", "shine.com", "glassdoor.co.in",
+    "jooble.org", "simplyhired.co.in"
 ]
 
 LOCATION_KEYWORDS = ["hyderabad", "secunderabad"]
 ENTRY_KEYWORDS = [
     "fresher", "freshers", "entry level", "entry-level", "0-1", "0-2",
     "0–1", "0–2", "junior", "trainee", "graduate", "associate", "intern",
-    "early career", "0 to 1", "0 to 2", "less than 2 years"
+    "early career", "0 to 1", "0 to 2", "1 year", "2 years"
 ]
 SENIOR_KEYWORDS = [
-    "3+ years", "4+ years", "5+ years", "6+ years", "7+ years", "8+ years",
-    "3 years experience", "4 years experience", "5 years experience",
-    "6 years experience", "7 years experience", "8 years experience",
-    "senior manager", "principal engineer", "architect", "tech lead", "technical lead"
+    "5+ years", "6+ years", "7+ years", "8+ years", "10+ years",
+    "5 years experience", "6 years experience", "7 years experience",
+    "8 years experience", "10 years experience", "senior manager",
+    "principal engineer", "architect", "tech lead", "technical lead"
 ]
-ARTICLE_ONLY_KEYWORDS = [
-    "salary in india", "salary guide", "salary trends", "average salary",
-    "salary insights", "how to become", "career roadmap", "roadmap to",
-    "tutorial", "course", "training", "certification", "learn java",
-    "java tools", "interview questions", "interview preparation", "what is java",
-    "skills in demand", "digital skills in demand", "career in java"
+BAD_PAGE_WORDS = [
+    "/jobs-in-", "/job-search", "/search", "/jobs?", "/jobs/", "/job-search/",
+    "search?q=", "fresher-jobs-in", "jobs-in-hyderabad", "job-search"
 ]
 
 
-def search_web(query):
-    encoded = urllib.parse.quote(query)
-    url = "https://html.duckduckgo.com/html/?q=" + encoded
+def fetch_search(query):
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-            "Accept-Language": "en-IN,en;q=0.9",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36"
         },
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8", errors="ignore")
 
 
-def clean_text(text):
-    text = unescape(text or "")
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+def clean_text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
-def make_id(title, link):
-    return hashlib.sha256(f"{title}|{link}".lower().encode()).hexdigest()[:16]
+def domain_of(url):
+    host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def allowed_domain(url):
+    host = domain_of(url)
+    return any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS)
+
+
+def is_search_page(url):
+    lower = url.lower()
+    return any(word in lower for word in BAD_PAGE_WORDS)
+
+
+def parse_results(page):
+    results = []
+    # DuckDuckGo HTML result blocks.
+    blocks = re.findall(r'<div[^>]+class="result[^>]*>(.*?)</div>\s*</div>', page, flags=re.I | re.S)
+    if not blocks:
+        blocks = re.findall(r'<div[^>]+class="result[^>]*>(.*?)(?=<div[^>]+class="result|$)', page, flags=re.I | re.S)
+
+    for block in blocks:
+        match = re.search(r'class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.I | re.S)
+        if not match:
+            continue
+        url = html.unescape(match.group(1))
+        title = clean_text(match.group(2))
+        if "uddg=" in url:
+            parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            url = parsed.get("uddg", [url])[0]
+        if not url.startswith("http") or not allowed_domain(url) or is_search_page(url):
+            continue
+        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</(?:a|div)>', block, flags=re.I | re.S)
+        snippet = clean_text(snippet_match.group(1)) if snippet_match else clean_text(block)
+        results.append({"title": title, "url": url, "snippet": snippet})
+
+    return results
+
+
+def extract_experience(text):
+    t = text.lower()
+    patterns = [
+        r"\b(0\s*[-–]\s*[12]\s*years?)\b",
+        r"\b(1\s*[-–]\s*2\s*years?)\b",
+        r"\b(0\s+to\s+[12]\s*years?)\b",
+        r"\b([12]\s*years?\s*(?:of\s*)?experience)\b",
+        r"\b(fresher(?:s)?)\b",
+        r"\b(entry[- ]level)\b",
+        r"\b(junior|trainee|graduate)\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, t, re.I)
+        if m:
+            return m.group(1)
+    return "Not disclosed"
+
+
+def extract_salary(text):
+    patterns = [
+        r"(?:₹|rs\.?\s*)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:-|to)\s*([0-9]+(?:\.[0-9]+)?)\s*(lpa|lakhs?|lac)\b",
+        r"(?:₹|rs\.?\s*)\s*([0-9]+(?:\.[0-9]+)?)\s*(lpa|lakhs?|lac)\b",
+        r"\b([0-9]+(?:\.[0-9]+)?)\s*(?:-|to)\s*([0-9]+(?:\.[0-9]+)?)\s*(lpa|lakhs?|lac)\b",
+        r"\b([0-9]+(?:\.[0-9]+)?)\s*(lpa|lakhs?|lac)\b",
+        r"(?:₹|rs\.?\s*)\s*([0-9,]+)\s*(?:/\s*month|per\s*month|monthly)\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return clean_text(m.group(0))
+    return "Not disclosed"
+
+
+def extract_company(title, snippet, url):
+    combined = clean_text(title)
+    # Common search-result title format: Job Title - Company - Location
+    parts = [p.strip() for p in re.split(r"\s+[-|–—]\s+", combined) if p.strip()]
+    if len(parts) >= 2:
+        candidates = [p for p in parts[1:] if not any(x in p.lower() for x in ["hyderabad", "india", "apply", "jobs"])]
+        if candidates:
+            return candidates[0][:100]
+
+    # Some listings expose Company: ... in the snippet.
+    m = re.search(r"(?:company|employer)\s*[:\-]\s*([^|,.]{2,80})", snippet, re.I)
+    if m:
+        return clean_text(m.group(1))
+
+    # Fall back to the job-board host rather than falsely inventing a company.
+    return domain_of(url)
+
+
+def make_id(title, url):
+    return hashlib.sha256(f"{title}|{url}".lower().encode()).hexdigest()[:16]
 
 
 def load_existing():
@@ -77,174 +168,116 @@ def load_existing():
     if not CSV_FILE.exists():
         return existing
     with open(CSV_FILE, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+        for row in csv.DictReader(f):
             link = row.get("Apply Link", "").strip()
-            title = row.get("Job Title", "").strip()
             if link:
                 existing.add(link)
-            elif title:
-                existing.add(make_id(title, ""))
     return existing
 
 
-def normalize_result_url(href):
-    href = unescape(href or "")
-    match = re.search(r"uddg=([^&]+)", href)
-    if match:
-        return urllib.parse.unquote(match.group(1))
-    return href
-
-
-def parse_search_results(html):
-    results = []
-    # DuckDuckGo result blocks contain a result link and a short snippet.
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>(.*?)(?=<div class="result|$)',
-        re.I | re.S,
-    )
-    for match in pattern.finditer(html):
-        link = normalize_result_url(match.group(1))
-        title = clean_text(match.group(2))
-        block = match.group(3)
-        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</', block, re.I | re.S)
-        snippet = clean_text(snippet_match.group(1)) if snippet_match else clean_text(block)
-        if link.startswith("http") and title:
-            results.append({"title": title, "link": link, "description": snippet})
-    return results
-
-
-def looks_like_job(title, description, link):
-    text = f"{title} {description} {link}".lower()
-
-    if "java" not in text:
-        return False
-    if not any(k in text for k in LOCATION_KEYWORDS):
-        return False
-    if any(k in text for k in ARTICLE_ONLY_KEYWORDS):
-        return False
-
-    # Prefer known job boards and reject obvious non-job domains/pages.
-    known_site = any(site in text for site in JOB_SITES)
-    job_signal = any(k in text for k in [
-        "job", "jobs", "hiring", "opening", "openings", "vacancy", "apply",
-        "recruitment", "job description", "responsibilities", "qualifications",
-        "career", "position", "role"
-    ])
-    if not (known_site or job_signal):
-        return False
-
-    return True
-
-
-def score_job(title, description, link):
-    text = f"{title} {description} {link}".lower()
+def score_job(title, snippet):
+    text = f"{title} {snippet}".lower()
     score = 0
-    if "java" in text:
-        score += 30
-    if "full stack" in text:
-        score += 25
-    if "spring boot" in text:
-        score += 20
-    if "microservices" in text:
-        score += 10
-    if "rest api" in text or "restful" in text:
-        score += 7
-    if "react" in text or "angular" in text:
-        score += 8
-    if "sql" in text or "mysql" in text or "oracle" in text:
-        score += 5
-    if "hibernate" in text or "jpa" in text:
-        score += 5
-    if any(k in text for k in LOCATION_KEYWORDS):
-        score += 25
-    if any(k in text for k in ENTRY_KEYWORDS):
-        score += 25
+    for word, points in [
+        ("java", 30), ("full stack", 25), ("spring boot", 20),
+        ("microservices", 10), ("rest", 7), ("react", 7),
+        ("sql", 5), ("hibernate", 5), ("fresher", 20),
+        ("0-1", 20), ("0-2", 20), ("junior", 15), ("trainee", 15),
+        ("hyderabad", 20), ("secunderabad", 20)
+    ]:
+        if word in text:
+            score += points
     if any(k in text for k in SENIOR_KEYWORDS):
         score -= 50
-    if any(site in text for site in JOB_SITES):
-        score += 15
     return score
 
 
-def parse_results(html):
-    jobs = []
-    for result in parse_search_results(html):
-        title = result["title"]
-        link = result["link"]
-        description = result["description"]
-        if not looks_like_job(title, description, link):
-            continue
-        score = score_job(title, description, link)
-        if score < 50:
-            continue
-        jobs.append({
-            "title": title,
-            "link": link,
-            "description": description,
-            "score": score,
-        })
-    return jobs
+def parse_job(result):
+    title = clean_text(result["title"])
+    snippet = clean_text(result["snippet"])
+    url = result["url"]
+    text = f"{title} {snippet}".lower()
+
+    if "java" not in text or not any(k in text for k in LOCATION_KEYWORDS):
+        return None
+    if any(k in text for k in SENIOR_KEYWORDS):
+        return None
+    if not any(k in text for k in ENTRY_KEYWORDS):
+        # Allow unspecified experience only when the title is clearly a junior/trainee/fresher role.
+        if not any(k in text for k in ["junior java", "java fresher", "trainee java"]):
+            return None
+
+    score = score_job(title, snippet)
+    if score < 45:
+        return None
+
+    return {
+        "title": title,
+        "company": extract_company(title, snippet, url),
+        "location": "Hyderabad, India",
+        "experience": extract_experience(text),
+        "salary": extract_salary(text),
+        "posted": "Not disclosed",
+        "source": domain_of(url),
+        "url": url,
+        "score": score,
+    }
 
 
 def append_jobs(jobs):
     CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "Date Found", "Job Title", "Company", "Location", "Experience",
-        "Salary", "Posted", "Source", "Apply Link"
-    ]
-    file_exists = CSV_FILE.exists() and CSV_FILE.stat().st_size > 0
+    fields = ["Date Found", "Job Title", "Company", "Location", "Experience", "Salary", "Posted", "Source", "Apply Link"]
     existing = load_existing()
+    file_exists = CSV_FILE.exists() and CSV_FILE.stat().st_size > 0
     added = 0
 
     with open(CSV_FILE, "a", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         if not file_exists:
             writer.writeheader()
-
         for job in jobs:
-            if job["link"] in existing:
+            if job["url"] in existing:
                 continue
-            source = urllib.parse.urlparse(job["link"]).netloc.replace("www.", "")
             writer.writerow({
                 "Date Found": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 "Job Title": job["title"],
-                "Company": "See job posting",
-                "Location": "Hyderabad, India",
-                "Experience": "Verify in posting",
-                "Salary": "Not disclosed",
-                "Posted": "Verify in posting",
-                "Source": source,
-                "Apply Link": job["link"],
+                "Company": job["company"],
+                "Location": job["location"],
+                "Experience": job["experience"],
+                "Salary": job["salary"],
+                "Posted": job["posted"],
+                "Source": job["source"],
+                "Apply Link": job["url"],
             })
-            existing.add(job["link"])
+            existing.add(job["url"])
             added += 1
     return added
 
 
 def main():
-    all_jobs = []
-    print("Searching public web job listings for Hyderabad Java roles...")
+    candidates = {}
+    print("Searching for individual Hyderabad Java job postings...")
 
     for query in SEARCHES:
         print(f"Searching: {query}")
         try:
-            html = search_web(query)
-            jobs = parse_results(html)
-            print(f"  Job postings accepted: {len(jobs)}")
-            all_jobs.extend(jobs)
+            page = fetch_search(query)
+            results = parse_results(page)
+            accepted = 0
+            for result in results:
+                job = parse_job(result)
+                if job:
+                    key = job["url"].rstrip("/")
+                    if key not in candidates or job["score"] > candidates[key]["score"]:
+                        candidates[key] = job
+                        accepted += 1
+            print(f"  Individual postings accepted: {accepted}")
         except Exception as e:
-            print(f"Search failed for '{query}': {e}")
+            print(f"Search failed: {e}")
 
-    unique = {}
-    for job in all_jobs:
-        key = job["link"]
-        if key not in unique or job["score"] > unique[key]["score"]:
-            unique[key] = job
-
-    jobs = sorted(unique.values(), key=lambda x: x["score"], reverse=True)[:20]
+    jobs = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)[:25]
     added = append_jobs(jobs)
-    print(f"Found {len(jobs)} actual job-posting candidates.")
+    print(f"Found {len(jobs)} individual job-posting candidates.")
     print(f"Added {added} new jobs to the tracker.")
 
 
