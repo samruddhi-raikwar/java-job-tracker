@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,5 +31,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/job_tracker.csv
-          git diff --cached --quiet || git commit -m "Update Java job tracker"
-          git push
+          if git diff --cached --quiet; then
+            echo "No tracker changes to commit."
+            exit 0
+          fi
+          git commit -m "Update Java job tracker"
+          git pull --rebase origin main
+          git push origin HEAD:main
