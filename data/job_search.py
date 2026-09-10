@@ -9,18 +9,18 @@ from pathlib import Path
 
 CSV_FILE = Path("data/job_tracker.csv")
 
-# Search engines are used only to discover individual job-posting pages.
-# The tracker rejects generic search/list pages and keeps direct job URLs.
+# Search only for individual job-posting URLs, not general job-search pages.
 SEARCHES = [
-    'site:linkedin.com/jobs/view Java Developer Hyderabad fresher',
-    'site:linkedin.com/jobs/view Java Full Stack Developer Hyderabad',
-    'site:in.indeed.com/viewjob Java Developer Hyderabad fresher',
-    'site:in.indeed.com/viewjob Java Full Stack Developer Hyderabad',
-    'site:naukri.com/job-listings Java Developer Hyderabad fresher',
-    'site:foundit.in/job Java Developer Hyderabad fresher',
-    'site:hirist.tech Java Developer Hyderabad 0-2 years',
-    'site:internshala.com/job/detail Java Developer Hyderabad fresher',
-    'site:shine.com/jobs Java Developer Hyderabad fresher',
+    'site:linkedin.com/jobs/view "Java Developer" Hyderabad fresher',
+    'site:linkedin.com/jobs/view "Java Full Stack Developer" Hyderabad',
+    'site:linkedin.com/jobs/view "Spring Boot" Hyderabad 0-2 years',
+    'site:in.indeed.com/viewjob "Java Developer" Hyderabad fresher',
+    'site:in.indeed.com/viewjob "Java Full Stack Developer" Hyderabad',
+    'site:naukri.com/job-listings "Java Developer" Hyderabad fresher',
+    'site:foundit.in/job "Java Developer" Hyderabad fresher',
+    'site:hirist.tech "Java Developer" Hyderabad 0-2 years',
+    'site:internshala.com/job/detail "Java Developer" Hyderabad fresher',
+    'site:shine.com/jobs "Java Developer" Hyderabad fresher',
 ]
 
 ALLOWED_DOMAINS = [
@@ -33,7 +33,8 @@ LOCATION_KEYWORDS = ["hyderabad", "secunderabad"]
 ENTRY_KEYWORDS = [
     "fresher", "freshers", "entry level", "entry-level", "0-1", "0-2",
     "0–1", "0–2", "junior", "trainee", "graduate", "associate", "intern",
-    "early career", "0 to 1", "0 to 2", "1 year", "2 years"
+    "early career", "0 to 1", "0 to 2", "1 year", "2 years", "1-2 years",
+    "1–2 years"
 ]
 SENIOR_KEYWORDS = [
     "5+ years", "6+ years", "7+ years", "8+ years", "10+ years",
@@ -41,9 +42,13 @@ SENIOR_KEYWORDS = [
     "8 years experience", "10 years experience", "senior manager",
     "principal engineer", "architect", "tech lead", "technical lead"
 ]
-BAD_PAGE_WORDS = [
-    "/jobs-in-", "/job-search", "/search", "/jobs?", "/jobs/", "/job-search/",
-    "search?q=", "fresher-jobs-in", "jobs-in-hyderabad", "job-search"
+
+# These identify generic search/listing pages.  IMPORTANT: do not block
+# /jobs/view/... because that is a direct LinkedIn posting URL.
+GENERIC_PAGE_PATTERNS = [
+    "/jobs-in-", "/job-search", "/search", "/jobs?", "search?q=",
+    "fresher-jobs-in", "jobs-in-hyderabad", "job-search",
+    "/job-search/", "/search/"
 ]
 
 
@@ -78,38 +83,63 @@ def allowed_domain(url):
     return any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS)
 
 
-def is_search_page(url):
+def is_generic_page(url):
     lower = url.lower()
-    return any(word in lower for word in BAD_PAGE_WORDS)
+    # LinkedIn direct jobs are /jobs/view/<id>/ and must be kept.
+    if "linkedin.com/jobs/view/" in lower:
+        return False
+    # Indeed direct jobs are /viewjob?jk=...
+    if "indeed.com/viewjob" in lower:
+        return False
+    # Internshala direct jobs are /job/detail/<id>/...
+    if "internshala.com/job/detail/" in lower:
+        return False
+    # Naukri direct jobs normally contain /job-listings- followed by a job slug.
+    if "naukri.com/job-listings-" in lower:
+        return False
+    # Reject known generic listing/search URLs.
+    return any(pattern in lower for pattern in GENERIC_PAGE_PATTERNS)
 
 
 def parse_results(page):
     results = []
-    # DuckDuckGo HTML result blocks.
-    blocks = re.findall(r'<div[^>]+class="result[^>]*>(.*?)</div>\s*</div>', page, flags=re.I | re.S)
-    if not blocks:
-        blocks = re.findall(r'<div[^>]+class="result[^>]*>(.*?)(?=<div[^>]+class="result|$)', page, flags=re.I | re.S)
+    blocks = re.findall(
+        r'<div[^>]+class="result[^>]*>(.*?)(?=<div[^>]+class="result|$)',
+        page,
+        flags=re.I | re.S,
+    )
 
     for block in blocks:
-        match = re.search(r'class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.I | re.S)
+        match = re.search(
+            r'class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+            block,
+            flags=re.I | re.S,
+        )
         if not match:
             continue
+
         url = html.unescape(match.group(1))
         title = clean_text(match.group(2))
         if "uddg=" in url:
             parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             url = parsed.get("uddg", [url])[0]
-        if not url.startswith("http") or not allowed_domain(url) or is_search_page(url):
+        url = urllib.parse.unquote(url)
+
+        if not url.startswith("http") or not allowed_domain(url) or is_generic_page(url):
             continue
-        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</(?:a|div)>', block, flags=re.I | re.S)
-        snippet = clean_text(snippet_match.group(1)) if snippet_match else clean_text(block)
+
+        snippet_match = re.search(
+            r'class="result__snippet"[^>]*>(.*?)</(?:a|div)>',
+            block,
+            flags=re.I | re.S,
+        )
+        snippet = clean_text(snippet_match.group(1)) if snippet_match else ""
         results.append({"title": title, "url": url, "snippet": snippet})
 
     return results
 
 
 def extract_experience(text):
-    t = text.lower()
     patterns = [
         r"\b(0\s*[-–]\s*[12]\s*years?)\b",
         r"\b(1\s*[-–]\s*2\s*years?)\b",
@@ -120,9 +150,9 @@ def extract_experience(text):
         r"\b(junior|trainee|graduate)\b",
     ]
     for pattern in patterns:
-        m = re.search(pattern, t, re.I)
+        m = re.search(pattern, text, re.I)
         if m:
-            return m.group(1)
+            return clean_text(m.group(1))
     return "Not disclosed"
 
 
@@ -142,37 +172,26 @@ def extract_salary(text):
 
 
 def extract_company(title, snippet, url):
-    combined = clean_text(title)
-    # Common search-result title format: Job Title - Company - Location
-    parts = [p.strip() for p in re.split(r"\s+[-|–—]\s+", combined) if p.strip()]
-    if len(parts) >= 2:
-        candidates = [p for p in parts[1:] if not any(x in p.lower() for x in ["hyderabad", "india", "apply", "jobs"])]
-        if candidates:
-            return candidates[0][:100]
-
-    # Some listings expose Company: ... in the snippet.
-    m = re.search(r"(?:company|employer)\s*[:\-]\s*([^|,.]{2,80})", snippet, re.I)
+    # Prefer explicit "Company: X" information.
+    m = re.search(r"(?:company|employer)\s*[:\-]\s*([^|,.]{2,100})", snippet, re.I)
     if m:
         return clean_text(m.group(1))
 
-    # Fall back to the job-board host rather than falsely inventing a company.
-    return domain_of(url)
+    # Common result format: Job Title - Company - Location.
+    parts = [p.strip() for p in re.split(r"\s+[-|–—]\s+", title) if p.strip()]
+    if len(parts) >= 2:
+        for candidate in parts[1:]:
+            low = candidate.lower()
+            if not any(x in low for x in ["hyderabad", "secunderabad", "india", "apply", "jobs"]):
+                return candidate[:100]
 
+    # Some boards put the company after a separator in the snippet.
+    m = re.search(r"\bby\s+([A-Z][A-Za-z0-9&. -]{2,80})", snippet)
+    if m:
+        return clean_text(m.group(1))
 
-def make_id(title, url):
-    return hashlib.sha256(f"{title}|{url}".lower().encode()).hexdigest()[:16]
-
-
-def load_existing():
-    existing = set()
-    if not CSV_FILE.exists():
-        return existing
-    with open(CSV_FILE, "r", encoding="utf-8", newline="") as f:
-        for row in csv.DictReader(f):
-            link = row.get("Apply Link", "").strip()
-            if link:
-                existing.add(link)
-    return existing
+    # Never invent a company name.
+    return "Not disclosed"
 
 
 def score_job(title, snippet):
@@ -203,7 +222,6 @@ def parse_job(result):
     if any(k in text for k in SENIOR_KEYWORDS):
         return None
     if not any(k in text for k in ENTRY_KEYWORDS):
-        # Allow unspecified experience only when the title is clearly a junior/trainee/fresher role.
         if not any(k in text for k in ["junior java", "java fresher", "trainee java"]):
             return None
 
@@ -224,9 +242,24 @@ def parse_job(result):
     }
 
 
+def load_existing():
+    existing = set()
+    if not CSV_FILE.exists():
+        return existing
+    with open(CSV_FILE, "r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            link = row.get("Apply Link", "").strip()
+            if link:
+                existing.add(link.rstrip("/"))
+    return existing
+
+
 def append_jobs(jobs):
     CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["Date Found", "Job Title", "Company", "Location", "Experience", "Salary", "Posted", "Source", "Apply Link"]
+    fields = [
+        "Date Found", "Job Title", "Company", "Location", "Experience",
+        "Salary", "Posted", "Source", "Apply Link"
+    ]
     existing = load_existing()
     file_exists = CSV_FILE.exists() and CSV_FILE.stat().st_size > 0
     added = 0
@@ -236,7 +269,8 @@ def append_jobs(jobs):
         if not file_exists:
             writer.writeheader()
         for job in jobs:
-            if job["url"] in existing:
+            key = job["url"].rstrip("/")
+            if key in existing:
                 continue
             writer.writerow({
                 "Date Found": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -249,7 +283,7 @@ def append_jobs(jobs):
                 "Source": job["source"],
                 "Apply Link": job["url"],
             })
-            existing.add(job["url"])
+            existing.add(key)
             added += 1
     return added
 
