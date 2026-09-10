@@ -9,28 +9,36 @@ from pathlib import Path
 
 CSV_FILE = Path("data/job_tracker.csv")
 
-# Google News RSS is used because it can be queried without paid job-board APIs.
-# Keep the searches broad enough that relevant listings are not lost because
-# "Hyderabad" or "fresher" is missing from the article snippet.
+# Google News RSS is only used to discover pages. Strong filters below prevent
+# normal news/articles/salary guides from entering the job tracker.
 SEARCHES = [
-    'Java Developer Hyderabad fresher',
-    'Java Developer Hyderabad "0-2 years"',
-    'Java Full Stack Developer Hyderabad',
-    'Java Spring Boot Developer Hyderabad fresher',
-    'Java Full Stack Hyderabad entry level',
-    'Junior Java Developer Hyderabad',
-    'Trainee Java Developer Hyderabad',
-    'Java Developer Hyderabad graduate',
+    'Java Developer Hyderabad fresher job hiring',
+    'Java Developer Hyderabad "0-2 years" job',
+    'Java Full Stack Developer Hyderabad hiring',
+    'Java Spring Boot Developer Hyderabad fresher job',
+    'Junior Java Developer Hyderabad job',
+    'Trainee Java Developer Hyderabad job',
+    'Java Developer Hyderabad graduate hiring',
 ]
 
 LOCATION_KEYWORDS = ["hyderabad", "secunderabad"]
-
 ENTRY_KEYWORDS = [
     "fresher", "freshers", "entry level", "entry-level", "0-1", "0-2",
-    "0–1", "0–2", "junior", "trainee", "graduate", "associate",
-    "intern", "early career"
+    "0–1", "0–2", "junior", "trainee", "graduate", "associate", "intern",
+    "early career", "0 to 1", "0 to 2"
 ]
-
+JOB_KEYWORDS = [
+    "job", "jobs", "hiring", "vacancy", "vacancies", "opening", "openings",
+    "apply", "recruitment", "career", "careers", "walk-in", "walk in",
+    "position", "role", "job description", "responsibilities", "qualifications"
+]
+ARTICLE_ONLY_KEYWORDS = [
+    "salary in india", "salary guide", "salary trends", "average salary",
+    "salary insights", "how to become", "career roadmap", "roadmap to",
+    "tips", "tutorial", "course", "training", "certification", "learn java",
+    "java tools", "interview questions", "interview preparation", "what is java",
+    "skills in demand", "digital skills in demand", "career in java"
+]
 SENIOR_KEYWORDS = [
     "5+ years", "6+ years", "7+ years", "8+ years", "10+ years",
     "5 years experience", "6 years experience", "7 years experience",
@@ -45,31 +53,25 @@ def google_news_rss(query):
         "https://news.google.com/rss/search?"
         f"q={encoded}&hl=en-IN&gl=IN&ceid=IN:en"
     )
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read()
 
 
 def clean_text(text):
-    # Remove simple HTML tags/entities from Google News descriptions.
     text = re.sub(r"<[^>]+>", " ", text or "")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def make_id(title, link):
-    value = f"{title}|{link}".lower()
-    return hashlib.sha256(value.encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{title}|{link}".lower().encode()).hexdigest()[:16]
 
 
 def load_existing():
     existing = set()
     if not CSV_FILE.exists():
         return existing
-
     with open(CSV_FILE, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -92,8 +94,6 @@ def score_job(title, description):
         score += 25
     if "spring boot" in text:
         score += 20
-    if "spring" in text:
-        score += 5
     if "microservices" in text:
         score += 10
     if "rest api" in text or "restful" in text:
@@ -104,17 +104,36 @@ def score_job(title, description):
         score += 5
     if "hibernate" in text or "jpa" in text:
         score += 5
-
     if any(k in text for k in LOCATION_KEYWORDS):
         score += 20
-
     if any(k in text for k in ENTRY_KEYWORDS):
         score += 20
-
     if any(k in text for k in SENIOR_KEYWORDS):
         score -= 35
+    if any(k in text for k in JOB_KEYWORDS):
+        score += 15
+    if any(k in text for k in ARTICLE_ONLY_KEYWORDS):
+        score -= 60
 
     return score
+
+
+def looks_like_job(title, description):
+    text = f"{title} {description}".lower()
+
+    # Reject obvious educational/news content even when it contains Java + Hyderabad.
+    if any(k in text for k in ARTICLE_ONLY_KEYWORDS):
+        return False
+
+    # A real listing should contain at least one recruitment/job signal.
+    if not any(k in text for k in JOB_KEYWORDS):
+        return False
+
+    # Reject pages that are clearly about salaries rather than an opening.
+    if "salary" in text and not any(k in text for k in ["job", "hiring", "opening", "vacancy", "apply"]):
+        return False
+
+    return True
 
 
 def parse_feed(xml_data):
@@ -132,13 +151,16 @@ def parse_feed(xml_data):
 
         text = f"{title} {description}".lower()
 
-        # The query already contains Hyderabad. Do NOT require the word
-        # Hyderabad to appear again in the RSS snippet; many job listings
-        # omit the location from their title/description.
         if "java" not in text:
+            continue
+        if not any(k in text for k in LOCATION_KEYWORDS):
+            continue
+        if not looks_like_job(title, description):
             continue
 
         score = score_job(title, description)
+        if score < 50:
+            continue
 
         jobs.append({
             "title": title,
@@ -154,7 +176,6 @@ def parse_feed(xml_data):
 def append_jobs(jobs):
     CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
     file_exists = CSV_FILE.exists()
-
     fields = [
         "Date Found", "Job Title", "Company", "Location", "Experience",
         "Salary", "Posted", "Source", "Apply Link"
@@ -165,7 +186,6 @@ def append_jobs(jobs):
 
     with open(CSV_FILE, "a", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
-
         if not file_exists or CSV_FILE.stat().st_size == 0:
             writer.writeheader()
 
@@ -174,7 +194,6 @@ def append_jobs(jobs):
                 continue
 
             source = urllib.parse.urlparse(job["link"]).netloc
-
             writer.writerow({
                 "Date Found": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 "Job Title": job["title"],
@@ -186,7 +205,6 @@ def append_jobs(jobs):
                 "Source": source,
                 "Apply Link": job["link"],
             })
-
             existing.add(job["link"])
             added += 1
 
@@ -195,14 +213,14 @@ def append_jobs(jobs):
 
 def main():
     all_jobs = []
-    print("Searching for new Hyderabad Java jobs...")
+    print("Searching for actual Hyderabad Java job postings...")
 
     for query in SEARCHES:
         print(f"Searching: {query}")
         try:
             data = google_news_rss(query)
             jobs = parse_feed(data)
-            print(f"  RSS results accepted: {len(jobs)}")
+            print(f"  Job postings accepted: {len(jobs)}")
             all_jobs.extend(jobs)
         except Exception as e:
             print(f"Search failed for '{query}': {e}")
@@ -215,13 +233,10 @@ def main():
 
     jobs = list(unique.values())
     jobs.sort(key=lambda x: x["score"], reverse=True)
-
-    # Keep only useful matches and avoid filling the tracker with weak results.
-    jobs = [job for job in jobs if job["score"] >= 30][:15]
+    jobs = jobs[:15]
 
     added = append_jobs(jobs)
-
-    print(f"Found {len(jobs)} relevant results.")
+    print(f"Found {len(jobs)} actual job-posting candidates.")
     print(f"Added {added} new jobs to the tracker.")
 
 
